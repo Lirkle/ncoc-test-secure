@@ -1,0 +1,140 @@
+Option Explicit
+
+Public Sub BlueNames_AndFixSpacesAfterDot()
+    Dim sld As Slide
+    Dim changed As Long
+
+    For Each sld In ActivePresentation.Slides
+        changed = changed + ProcessShapesCollection(sld.Shapes)
+    Next sld
+
+    MsgBox "Готово. Обработано совпадений: " & changed, vbInformation, "Status"
+End Sub
+
+Private Function ProcessShapesCollection(ByVal shps As Shapes) As Long
+    Dim shp As Shape
+    Dim cnt As Long
+
+    For Each shp In shps
+        cnt = cnt + ProcessShapeRecursive(shp)
+    Next shp
+
+    ProcessShapesCollection = cnt
+End Function
+
+Private Function ProcessShapeRecursive(ByVal shp As Shape) As Long
+    Dim cnt As Long
+    Dim i As Long
+
+    ' Группы
+    If shp.Type = msoGroup Then
+        For i = 1 To shp.GroupItems.Count
+            cnt = cnt + ProcessShapeRecursive(shp.GroupItems(i))
+        Next i
+        ProcessShapeRecursive = cnt
+        Exit Function
+    End If
+
+    ' Обычный текст
+    If shp.HasTextFrame Then
+        If shp.TextFrame.HasText Then
+            cnt = cnt + FixAndColorNamesInRange(shp.TextFrame2.TextRange)
+        End If
+    End If
+
+    ' Таблицы
+    If shp.HasTable Then
+        Dim r As Long, c As Long
+        For r = 1 To shp.Table.Rows.Count
+            For c = 1 To shp.Table.Columns.Count
+                With shp.Table.Cell(r, c).Shape
+                    If .HasTextFrame Then
+                        If .TextFrame.HasText Then
+                            cnt = cnt + FixAndColorNamesInRange(.TextFrame2.TextRange)
+                        End If
+                    End If
+                End With
+            Next c
+        Next r
+    End If
+
+    ' SmartArt
+    If shp.HasSmartArt Then
+        Dim node As SmartArtNode
+        For Each node In shp.SmartArt.AllNodes
+            cnt = cnt + FixAndColorNamesInRange(node.TextFrame2.TextRange)
+        Next node
+    End If
+
+    ProcessShapeRecursive = cnt
+End Function
+
+Private Function FixAndColorNamesInRange(ByVal tr As TextRange2) As Long
+    Dim re As Object, matches As Object, m As Object
+    Dim txt As String
+    Dim i As Long
+    Dim startPos As Long, totalLen As Long
+    Dim initPart As String, surPart As String
+    Dim spacesCount As Long
+    Dim dotPos As Long, spacesStart As Long
+
+    If tr Is Nothing Then Exit Function
+    If tr.Length <= 0 Then Exit Function
+
+    txt = tr.Text
+
+    Set re = CreateObject("VBScript.RegExp")
+    With re
+        .Global = True
+        .IgnoreCase = False
+        ' 1-3 буквы инициал (I., A., Sh., Zh. и т.п.) + любые пробелы + фамилия
+        .Pattern = "\b([A-Za-zА-Яа-я]{1,3})\.\s+([A-Za-zА-Яа-я'’-]+)\b"
+    End With
+
+    Set matches = re.Execute(txt)
+    If matches.Count = 0 Then Exit Function
+
+    ' Важно: идем с конца, чтобы индексы не съезжали при удалении пробелов
+    For i = matches.Count - 1 To 0 Step -1
+        Set m = matches(i)
+
+        initPart = m.SubMatches(0)
+        surPart = m.SubMatches(1)
+
+        ' m.FirstIndex 0-based, Characters 1-based
+        startPos = m.FirstIndex + 1
+
+        ' Позиция точки внутри найденного фрагмента
+        dotPos = startPos + Len(initPart)
+
+        ' Удаляем пробелы после точки
+        spacesStart = dotPos + 1
+        spacesCount = CountSpacesFromPos(tr, spacesStart)
+
+        If spacesCount > 0 Then
+            tr.Characters(spacesStart, spacesCount).Delete
+        End If
+
+        ' Красим "Инициал.Фамилия" в синий
+        totalLen = Len(initPart) + 1 + Len(surPart) ' +1 это точка
+        With tr.Characters(startPos, totalLen).Font.Fill.ForeColor
+            .RGB = RGB(0, 112, 192)
+        End With
+    Next i
+
+    FixAndColorNamesInRange = matches.Count
+End Function
+
+Private Function CountSpacesFromPos(ByVal tr As TextRange2, ByVal pos As Long) As Long
+    Dim cnt As Long
+    Dim ch As String
+
+    cnt = 0
+    Do While pos + cnt <= tr.Length
+        ch = tr.Characters(pos + cnt, 1).Text
+        If ch <> " " And ch <> vbTab Then Exit Do
+        cnt = cnt + 1
+    Loop
+
+    CountSpacesFromPos = cnt
+End Function
