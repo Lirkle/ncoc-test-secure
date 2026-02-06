@@ -1,5 +1,7 @@
 Option Explicit
 
+Private Const BLUE_NAME As Long = 0 ' заглушка, RGB задаем ниже через RGB()
+
 Public Sub BlueNames_AndFixSpacesAfterDot()
     Dim sld As Slide
     Dim changed As Long
@@ -35,9 +37,9 @@ Private Function ProcessShapeRecursive(ByVal shp As Shape) As Long
         Exit Function
     End If
 
-    ' Обычный текст
+    ' Обычный текст - важный фикс: проверяем TextFrame2
     If shp.HasTextFrame Then
-        If shp.TextFrame.HasText Then
+        If shp.TextFrame2.HasText Then
             cnt = cnt + FixAndColorNamesInRange(shp.TextFrame2.TextRange)
         End If
     End If
@@ -49,7 +51,7 @@ Private Function ProcessShapeRecursive(ByVal shp As Shape) As Long
             For c = 1 To shp.Table.Columns.Count
                 With shp.Table.Cell(r, c).Shape
                     If .HasTextFrame Then
-                        If .TextFrame.HasText Then
+                        If .TextFrame2.HasText Then
                             cnt = cnt + FixAndColorNamesInRange(.TextFrame2.TextRange)
                         End If
                     End If
@@ -62,7 +64,11 @@ Private Function ProcessShapeRecursive(ByVal shp As Shape) As Long
     If shp.HasSmartArt Then
         Dim node As SmartArtNode
         For Each node In shp.SmartArt.AllNodes
-            cnt = cnt + FixAndColorNamesInRange(node.TextFrame2.TextRange)
+            If Not node.TextFrame2 Is Nothing Then
+                If node.TextFrame2.HasText Then
+                    cnt = cnt + FixAndColorNamesInRange(node.TextFrame2.TextRange)
+                End If
+            End If
         Next node
     End If
 
@@ -70,71 +76,130 @@ Private Function ProcessShapeRecursive(ByVal shp As Shape) As Long
 End Function
 
 Private Function FixAndColorNamesInRange(ByVal tr As TextRange2) As Long
-    Dim re As Object, matches As Object, m As Object
-    Dim txt As String
-    Dim i As Long
-    Dim startPos As Long, totalLen As Long
-    Dim initPart As String, surPart As String
-    Dim spacesCount As Long
-    Dim dotPos As Long, spacesStart As Long
-
     If tr Is Nothing Then Exit Function
     If tr.Length <= 0 Then Exit Function
 
+    Dim cnt As Long
+    cnt = cnt + FixInitialDotNames(tr)      ' I.   Partilova  -> I.Partilova + покраска
+    cnt = cnt + ColorFullNames(tr)          ' Ualikhan Zhanaissov -> покраска
+    cnt = cnt + ColorSlashBetweenNames(tr)  ' "Имя ... / Имя ..." -> красим только "/"
+
+    FixAndColorNamesInRange = cnt
+End Function
+
+' 1) Инициал.Фамилия (удаляем любые пробелы/переносы после точки и красим полностью)
+Private Function FixInitialDotNames(ByVal tr As TextRange2) As Long
+    Dim letters As String
+    letters = "A-Za-zА-Яа-яЁёӘәӨөҮүҚқҒғІіҢңҺһ"
+
+    Dim re As Object, matches As Object, m As Object
+    Dim txt As String
     txt = tr.Text
 
     Set re = CreateObject("VBScript.RegExp")
     With re
         .Global = True
         .IgnoreCase = False
-        ' 1-3 буквы инициал (I., A., Sh., Zh. и т.п.) + любые пробелы + фамилия
-        .Pattern = "\b([A-Za-zА-Яа-я]{1,3})\.\s+([A-Za-zА-Яа-я'’-]+)\b"
+        ' Группа 1 - инициал (1-3 буквы)
+        ' Группа 2 - любые пробельные после точки (включая NBSP \xA0)
+        ' Группа 3 - фамилия
+        .Pattern = "\b([" & letters & "]{1,3})\.([\s\xA0]*)([" & letters & "](?:[" & letters & "'’\-]*[" & letters & "])?)\b"
     End With
 
     Set matches = re.Execute(txt)
     If matches.Count = 0 Then Exit Function
 
-    ' Важно: идем с конца, чтобы индексы не съезжали при удалении пробелов
+    Dim i As Long
     For i = matches.Count - 1 To 0 Step -1
         Set m = matches(i)
 
-        initPart = m.SubMatches(0)
-        surPart = m.SubMatches(1)
-
-        ' m.FirstIndex 0-based, Characters 1-based
+        Dim startPos As Long, initLen As Long, wsLen As Long, surLen As Long
         startPos = m.FirstIndex + 1
+        initLen = Len(m.SubMatches(0))
+        wsLen = Len(m.SubMatches(1))
+        surLen = Len(m.SubMatches(2))
 
-        ' Позиция точки внутри найденного фрагмента
-        dotPos = startPos + Len(initPart)
-
-        ' Удаляем пробелы после точки
-        spacesStart = dotPos + 1
-        spacesCount = CountSpacesFromPos(tr, spacesStart)
-
-        If spacesCount > 0 Then
-            tr.Characters(spacesStart, spacesCount).Delete
+        ' Удаляем любые пробелы/переносы сразу после точки
+        If wsLen > 0 Then
+            tr.Characters(startPos + initLen + 1, wsLen).Delete
         End If
 
-        ' Красим "Инициал.Фамилия" в синий
-        totalLen = Len(initPart) + 1 + Len(surPart) ' +1 это точка
-        With tr.Characters(startPos, totalLen).Font.Fill.ForeColor
-            .RGB = RGB(0, 112, 192)
-        End With
+        ' Красим "Инициал.Фамилия" целиком (теперь без промежутка)
+        ApplyBlue tr, startPos, (initLen + 1 + surLen)
+
+        FixInitialDotNames = FixInitialDotNames + 1
     Next i
-
-    FixAndColorNamesInRange = matches.Count
 End Function
 
-Private Function CountSpacesFromPos(ByVal tr As TextRange2, ByVal pos As Long) As Long
-    Dim cnt As Long
-    Dim ch As String
+' 2) Полные имена "Имя Фамилия" (две части, обе с заглавной)
+Private Function ColorFullNames(ByVal tr As TextRange2) As Long
+    Dim letters As String, caps As String
+    letters = "A-Za-zА-Яа-яЁёӘәӨөҮүҚқҒғІіҢңҺһ"
+    caps = "A-ZА-ЯЁӘӨҮҚҒІҢҺ"
 
-    cnt = 0
-    Do While pos + cnt <= tr.Length
-        ch = tr.Characters(pos + cnt, 1).Text
-        If ch <> " " And ch <> vbTab Then Exit Do
-        cnt = cnt + 1
-    Loop
+    Dim re As Object, matches As Object, m As Object
+    Dim txt As String
+    txt = tr.Text
 
-    CountSpacesFromPos = cnt
+    Set re = CreateObject("VBScript.RegExp")
+    With re
+        .Global = True
+        .IgnoreCase = False
+        ' Имя + пробел(ы) + Фамилия, обе части начинаются с заглавной
+        .Pattern = "\b([" & caps & "][" & letters & "'’\-]{1,})[ \t\xA0]+([" & caps & "][" & letters & "'’\-]{1,})\b"
+    End With
+
+    Set matches = re.Execute(txt)
+    If matches.Count = 0 Then Exit Function
+
+    Dim i As Long
+    For i = matches.Count - 1 To 0 Step -1
+        Set m = matches(i)
+        ApplyBlue tr, (m.FirstIndex + 1), m.Length
+        ColorFullNames = ColorFullNames + 1
+    Next i
 End Function
+
+' 3) Красим только "/" когда он именно как разделитель между именами: " ...  /  ... "
+Private Function ColorSlashBetweenNames(ByVal tr As TextRange2) As Long
+    Dim letters As String
+    letters = "A-Za-zА-Яа-яЁёӘәӨөҮүҚқҒғІіҢңҺһ"
+
+    Dim re As Object, matches As Object, m As Object
+    Dim txt As String
+    txt = tr.Text
+
+    Set re = CreateObject("VBScript.RegExp")
+    With re
+        .Global = True
+        .IgnoreCase = False
+        ' Два "словоподобных" куска с пробелами вокруг слэша
+        ' Не зацепит IT/HR без пробелов и не зацепит URL
+        .Pattern = "\b([" & letters & "\.'’\-]{2,})\s+/\s+([" & letters & "\.'’\-]{2,})\b"
+    End With
+
+    Set matches = re.Execute(txt)
+    If matches.Count = 0 Then Exit Function
+
+    Dim i As Long
+    For i = matches.Count - 1 To 0 Step -1
+        Set m = matches(i)
+
+        Dim startPos As Long, slashRel As Long, slashPos As Long
+        startPos = m.FirstIndex + 1
+        slashRel = InStr(1, m.Value, "/")
+
+        If slashRel > 0 Then
+            slashPos = startPos + slashRel - 1
+            ApplyBlue tr, slashPos, 1
+            ColorSlashBetweenNames = ColorSlashBetweenNames + 1
+        End If
+    Next i
+End Function
+
+Private Sub ApplyBlue(ByVal tr As TextRange2, ByVal startPos As Long, ByVal ln As Long)
+    If ln <= 0 Then Exit Sub
+    On Error Resume Next
+    tr.Characters(startPos, ln).Font.Fill.ForeColor.RGB = RGB(0, 112, 192)
+    On Error GoTo 0
+End Sub
